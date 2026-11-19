@@ -1,8 +1,8 @@
 # CLAUDE.md: galaxies
 
 Galaxy collisions with real gravity, live on the GPU. One C++ file, OpenGL 4.6 compute shaders.
-Started 2026-11-19. Repo: `yiangwow/galaxies` (private), remote `origin` over SSH host `github-alt`. Feature branch + PR, never push to main.
-The creative direction is open: the owner decides it. Do not add game rules on your own.
+Started 2026-11-19. Repo: `yiangwow/galaxies` (public), remote `origin` over SSH host `github-alt`. Feature branch + PR, never push to main.
+Direction (owner, 2026-11-19): "i just want some cool stuff". It is a toy to look at, not a game. Do not add game rules.
 
 ## Build and run
 
@@ -34,6 +34,6 @@ Measured 2026-11-19 on the RX 9070 XT: 3.5 ms per step with 5.2 M particles, abo
 
 ## Known limits
 
-- Rings and bars are seeded shapes, not exact equilibria: they drift after a few turns.
+- Rings hold (tested 4000 steps, about 67 s live): ring stars weigh 1/`RING_ML` of other stars at the same light, so a ring does not clump under its own pull. Bars hold too. Spiral arms and cartwheel spokes are seeded shapes and wind up within about 15 s; that is real shear, not a bug.
 - The box has zero-potential walls; stars that leave it fly free.
 - Supernovae: checked by me on a recorded clip (`clips/merger.mp4`), the owner has not judged them yet. They fire in discs, arms and rings, not in the cores.

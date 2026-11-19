@@ -316,6 +316,9 @@ static float gFlux = 0.6f, gExposure = 0.3f, gBloom = 0.032f, gBeta = 0.85f, gVe
 enum { F_SPIRAL, F_BARRED, F_ELLIPTICAL, F_RING, F_POLAR, F_IRREGULAR, F_SOMBRERO, F_JETS, F_FLOCCULENT, F_GIANT, F_BULLSEYE, F_CARTWHEEL, F_PEA, NFAM };
 static double typeMass[NFAM];
 
+// Ring stars are young and bright: each one carries 1/RING_ML of the mass of another star. A ring as heavy
+// as it looks is cold and clumps under its own pull within a few turns; a light one keeps its shape.
+static const double RING_ML = 4.0;
 struct Model {
   double Md = 1.0, Rd = 5.0, z0 = 0.6, Mb = 0.2, ab = 1.2, rmaxB = 12, Mh = 5.0, ah = 14, rmaxH = 45, eps = 1.3, Q = 1.2;
   int nr = 0; double Mr[3] = {0, 0, 0}, Rr[3] = {10, 10, 10}, sr[3] = {1, 1, 1};   // rings: mass, radius, width
@@ -344,7 +347,7 @@ static const Col GOLD{1.0f, 0.60f, 0.28f}, AMBER{1.0f, 0.50f, 0.20f}, CREAM{1.0f
 // Everything that makes one galaxy itself. roll() fills it at random inside a family, so no two galaxies match.
 struct Recipe {
   Model m; int arms = 0, nClump = 0;
-  double pitch = 0.38, armFrac = 0, armW = 0.30, armStart = 2.0, armEnd = 1e9, patchy = 0, rbar = 0, flat = 1.0, clumpFrac = 0, Rmax = 32;
+  double pitch = 0.38, armFrac = 0, armW = 0.30, armStart = 2.0, armEnd = 1e9, patchy = 0, rbar = 0, flat = 1.0, clumpFrac = 0, Rmax = 32, ringHeat = 0.07;
   Col core = GOLD, disk = PALE, arm = BLUE, knot = PINK, bulgeOut = AMBER, jet = TEAL, clump[3] = {MAGENTA, CYAN, VIOLET}, ringCol[3] = {ELECTRIC, ELECTRIC, ELECTRIC};
   double diskLum = 0.70, armLum = 1.0, bulgeLum = 1.0, bulgeK = 3.0, knotFrac = 0.02, rimLum = 1.0;
   bool polar[3] = {false, false, false}, nucleus = false;
@@ -387,7 +390,7 @@ static Recipe roll(int fam, uint64_t seed) {
       if (U(0, 1) < 0.30) { m.nr = 2; m.Mr[1] = 0.2; m.Rr[1] = m.Rr[0] * 0.55; m.sr[1] = 0.8; q.ringCol[1] = bright[I(0, 8)]; }
       break;
     case F_POLAR:
-      m.Md = U(0.6, 0.8); m.Rd = U(2.8, 3.6); m.z0 = 0.5; m.Mb = 0.3; q.diskLum = 0.9; q.disk = CREAM;
+      m.Md = U(0.6, 0.8); m.Rd = U(2.8, 3.6); m.z0 = 0.5; m.Mb = 0.3; m.Q = 1.8; q.diskLum = 0.9; q.disk = CREAM;
       m.nr = 1; m.Mr[0] = U(0.3, 0.45); m.Rr[0] = U(11.5, 15.5); m.sr[0] = U(1.2, 1.8); q.polar[0] = true; q.ringCol[0] = U(0, 1) < 0.5 ? CYAN : p.arm;
       break;
     case F_IRREGULAR:
@@ -415,7 +418,8 @@ static Recipe roll(int fam, uint64_t seed) {
     case F_CARTWHEEL:
       m.Md = 0.35; m.Rd = 4.0; m.Mb = 0.2; q.diskLum = 0.5; size = std::min(size, 1.0);
       m.nr = 2; m.Mr[0] = 0.45; m.Rr[0] = U(15, 18); m.sr[0] = 1.3; m.Mr[1] = 0.15; m.Rr[1] = 4.5; m.sr[1] = 0.6; q.ringCol[1] = p.core;
-      q.arms = I(5, 8); q.pitch = U(1.0, 1.3); q.armFrac = 0.85; q.armW = 0.08; q.armStart = 4.5; q.armEnd = m.Rr[0]; break;
+      q.arms = I(5, 8); q.pitch = U(1.0, 1.3); q.armFrac = 0.85; q.armW = 0.08; q.armStart = 4.5; q.armEnd = m.Rr[0];
+      q.ringHeat = 0.14; break;   // the spokes shake the rim: a colder rim breaks up
     case F_PEA:
       m.Md = U(0.20, 0.30); m.Rd = U(1.6, 2.1); m.z0 = 0.6; m.Mb = 0.05; m.ab = 0.8; m.rmaxB = 6; m.Mh = 1.0; m.ah = 6; m.rmaxH = 20; m.Q = 1.4; size = 1;
       q.nClump = I(3, 5); q.clumpFrac = 0.30; q.disk = U(0, 1) < 0.6 ? TEAL : CYAN; q.core = WHITE; q.diskLum = 1.3; q.bulgeOut = WHITE;
@@ -423,7 +427,7 @@ static Recipe roll(int fam, uint64_t seed) {
       break;
   }
   m.Rd *= size; m.ab *= size; m.rmaxB = std::min(40.0, m.rmaxB * size); q.rbar *= size; q.armStart *= size;
-  for (int i = 0; i < m.nr; i++) { m.Rr[i] *= size; m.sr[i] *= size; }
+  for (int i = 0; i < m.nr; i++) { m.Rr[i] *= size; m.sr[i] *= size; m.Mr[i] /= RING_ML; }
   if (q.rbar > 0) { q.armStart = q.rbar; if (m.nr) m.Rr[0] = q.rbar; }
   if (fam == F_CARTWHEEL) q.armEnd = m.Rr[0];
   return q;
@@ -461,11 +465,12 @@ static double buildGalaxy(const Recipe& q, uint64_t seed, float* tp, float* tv, 
   auto kappa2 = [&](double R) { double d = 0.01 * R; return std::max(1e-12, R * (omega2(R + d) - omega2(R - d)) / (2 * d) + 4 * omega2(R)); };
 
   double MdEff = m.Md * 0.9826, MbEff = m.hern(m.Mb, m.ab, m.rmaxB, m.rmaxB), MhEff = m.hern(m.Mh, m.ah, m.rmaxH, m.rmaxH);
-  double Ms = MdEff + MbEff + m.Mj; for (int i = 0; i < m.nr; i++) Ms += m.Mr[i];
-  int nRing[3] = {0, 0, 0}, nRings = 0; for (int i = 0; i < m.nr; i++) { nRing[i] = int(NSTAR * m.Mr[i] / Ms); nRings += nRing[i]; }
-  int nJet = int(NSTAR * m.Mj / Ms), nBulge = int(NSTAR * MbEff / Ms), nDisk = m.Md > 0 ? NSTAR - nBulge - nRings - nJet : 0;
+  double Mrings = 0; for (int i = 0; i < m.nr; i++) Mrings += m.Mr[i];
+  double Ms = MdEff + MbEff + m.Mj + Mrings, Wl = Ms + (RING_ML - 1) * Mrings;   // Wl: the stars' light; a ring star weighs 1/RING_ML of another
+  int nRing[3] = {0, 0, 0}, nRings = 0; for (int i = 0; i < m.nr; i++) { nRing[i] = int(NSTAR * RING_ML * m.Mr[i] / Wl); nRings += nRing[i]; }
+  int nJet = int(NSTAR * m.Mj / Wl), nBulge = int(NSTAR * MbEff / Wl), nDisk = m.Md > 0 ? NSTAR - nBulge - nRings - nJet : 0;
   nBulge = NSTAR - nDisk - nRings - nJet;
-  double mStar = Ms / NSTAR, mHalo = MhEff / NHALO;
+  double mStar = Wl / NSTAR, mRing = mStar / RING_ML, mHalo = MhEff / NHALO;
   double Rref = 2.5 * m.Rd, s0 = m.Md > 0 ? m.Q * 3.36 * GRAV * m.sigma(Rref) / sqrt(kappa2(Rref)) * exp(Rref / (2 * m.Rd)) : 0;
   double Rcut = std::min(6 * m.Rd, q.Rmax);
 
@@ -527,10 +532,10 @@ static double buildGalaxy(const Recipe& q, uint64_t seed, float* tp, float* tv, 
   round(nBulge, m.ab, m.rmaxB, sb, mStar, false);
   for (int j = 0; j < m.nr; j++)
     for (int i = 0; i < nRing[j]; i++) {   // a ring of young stars on circular orbits
-      double R = std::max(0.5, m.Rr[j] + m.sr[j] * g()), th = 2 * M_PI * u(), vc = sqrt(m.vc2(R)), c = cos(th), s = sin(th), d = 0.14 * vc;
+      double R = std::max(0.5, m.Rr[j] + m.sr[j] * g()), th = 2 * M_PI * u(), vc = sqrt(m.vc2(R)), c = cos(th), s = sin(th), d = q.ringHeat * vc;
       double x = R * c, y = R * s, z = 0.35 * g(), vx = -vc * s + d * g(), vy = vc * c + d * g(), vz = d * g();
       uint32_t col = u() < 0.03 ? pack(q.knot, 1.0, 0, true) : pack(mixc(q.ringCol[j], WHITE, 0.25 * u()), 1.0, 2, false);
-      if (q.polar[j]) put(x, -z, y, mStar, vx, -vz, vy, col); else put(x, y, z, mStar, vx, vy, vz, col);
+      if (q.polar[j]) put(x, -z, y, mRing, vx, -vz, vy, col); else put(x, y, z, mRing, vx, vy, vz, col);
     }
   for (int i = 0; i < nJet; i++) {   // two needles: stars swinging straight through the core, up and down the spin axis
     double A = 8 + 26 * u(), z = (0.3 + (A - 0.3) * u()) * (u() < 0.5 ? -1 : 1);
