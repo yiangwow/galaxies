@@ -1,7 +1,7 @@
 # CLAUDE.md: galaxies
 
 Galaxy collisions with real gravity, live on the GPU. One C++ file, OpenGL 4.6 compute shaders.
-Started 2026-11-19. Repo: `yiangwow/galaxies` (private), remote `origin` over SSH host `github-alt`. Feature branch + PR, never push to main.
+Started 2026-11-19. Repo: `yiangwow/galaxies` (public), remote `origin` over SSH host `github-alt`. Feature branch + PR, never push to main.
 Direction (owner, 2026-11-19): "i just want some cool stuff". It is a toy to look at, not a game. Do not add game rules.
 
 ## Build and run
