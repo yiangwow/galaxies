@@ -4,6 +4,11 @@
 // Build: make.   Run: ./galaxies   (click = throw a galaxy in, mouse = look, wheel = zoom)
 #include <epoxy/gl.h>
 #include <GLFW/glfw3.h>
+#include <pulse/simple.h>
+#include <pulse/error.h>
+#include <complex>
+#include <chrono>
+#include <unistd.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -144,6 +149,7 @@ layout(std430,binding=0) readonly buffer P { vec4 pos[]; };
 layout(std430,binding=4) readonly buffer C { uint colr[]; };
 layout(binding=0) uniform sampler3D uRho;
 uniform mat4 uVP; uniform float uFlux, uSize, uRhoRef, uTime, uNova;
+uniform vec4 uKick[4], uHit[4];   // sound: x = start time, y = strength, z = seed
 out vec3 vCol; out float vNova;
 float hash(uint x){ x^=x>>16; x*=0x7feb352dU; x^=x>>15; x*=0x846ca68bU; x^=x>>16; return float(x)/4294967296.0; }
 void main(){
@@ -169,6 +175,23 @@ void main(){
     if(age<3.0){
       float f=exp(-age*2.0)*smoothstep(0.0,0.05,age);
       flash=f; vNova=1.0; col=mix(col,vec3(0.86,0.93,1.0),min(1.0,f*4.0));
+    }
+  }
+  // sound: every kick sends a ripple of light down the density: it starts in the crowded cores of every galaxy
+  // at once and runs out through discs, arms and tails, wherever they are
+  float dens=log2(max(rho,0.001)), wave=0.0;
+  for(int i=0;i<4;i++){
+    float t=uTime-uKick[i].x; if(t<0.0||t>1.2) continue;
+    float x=(dens-(3.0-t*26.0))/0.8;
+    wave+=uKick[i].y*exp(-x*x)*exp(-t*3.0);
+  }
+  lum*=1.0+8.0*wave; col=mix(col,vec3(0.80,0.90,1.0)*max(col.r,max(col.g,col.b)),min(1.0,wave)*0.6);
+  // sound: every sharp high hit (snare, hat) lights a random handful of stars for a moment
+  for(int i=0;i<4;i++){
+    float t=uTime-uHit[i].x; if(t<0.0||t>0.6) continue;
+    if(hash(id*2654435761u+uint(uHit[i].z)*97u+5u)<0.0003*uHit[i].y){
+      float g=0.25*uHit[i].y*exp(-t*7.0);
+      if(g>flash){ flash=g; vNova=1.0; col=mix(col,vec3(0.90,0.95,1.0),0.7); }
     }
   }
   float df=clamp(d*d/(150.0*150.0),0.12,3.0);
@@ -707,6 +730,93 @@ static void throwGalaxy(V3 q, V3 axis) {
   spawn(type, q * SPAWN_R, vel, rot);
 }
 
+// ---------------------------------------------------------------- sound
+// Listens to what the PC is playing (the monitor of the default output, never the microphone) and turns it
+// into three things the picture uses: kicks, sharp high hits (snares, hats) and how loud it is overall.
+struct Sound {
+  std::mutex mx; std::vector<std::pair<int, float>> events;   // (0 = kick, 1 = hit; strength 0..1)
+  std::atomic<float> level{0}; std::atomic<bool> present{false};
+};
+static Sound& snd = *new Sound;   // never destroyed: the listening thread may still run while the program exits
+
+struct Analyzer {
+  static const int FFT = 2048, HOP = 512, RATE = 48000;
+  std::vector<float> ring = std::vector<float>(FFT, 0.0f), prev = std::vector<float>(FFT / 2, 0.0f), cur = std::vector<float>(FFT / 2, 0.0f), win, pend;
+  long hop = 0, lastKick = -100, lastHit = -100, lastSound = -100000;
+  float kMean = 0, kPeak = 1e-3f, hMean = 0, hPeak = 1e-3f, loud = 0, loudPeak = 1e-3f;
+  bool log = false;
+  Analyzer() { win.resize(FFT); for (int i = 0; i < FFT; i++) win[i] = 0.5f - 0.5f * cosf(2 * PI * i / FFT); }
+  static void fft(std::vector<std::complex<float>>& a) {
+    int n = int(a.size());
+    for (int i = 1, j = 0; i < n; i++) { int bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) std::swap(a[i], a[j]); }
+    for (int len = 2; len <= n; len <<= 1) {
+      float ang = -2 * PI / len; std::complex<float> wl(cosf(ang), sinf(ang));
+      for (int i = 0; i < n; i += len) {
+        std::complex<float> w(1);
+        for (int j = 0; j < len / 2; j++) { auto u = a[i + j], v = a[i + j + len / 2] * w; a[i + j] = u + v; a[i + j + len / 2] = u - v; w *= wl; }
+      }
+    }
+  }
+  void feed(const float* x, size_t n) { for (size_t i = 0; i < n; i++) { pend.push_back(x[i]); if (int(pend.size()) == HOP) { analyse(); pend.clear(); } } }
+  // an onset: the band's rise (in log loudness) jumps well above what it has been doing lately
+  void onset(float flux, float& mean, float& peak, long& last, int rest, int kind) {
+    if (hop > 20) peak = std::max(peak * 0.9975f, flux);                      // forgets in about 4 s
+    bool hit = flux > 2.0f * mean + 0.12f * peak && flux > 0.15f && hop - last >= rest && hop - lastSound < 8 && hop > 20;
+    mean += (flux - mean) * 0.03f;
+    if (!hit) return;
+    last = hop; float st = std::min(1.0f, std::max(0.4f, flux / peak));
+    { std::lock_guard<std::mutex> l(snd.mx); snd.events.push_back({kind, st}); }
+    if (log) { printf("%s %7.3f s  strength %.2f\n", kind ? "hit " : "KICK", hop * double(HOP) / RATE, st); fflush(stdout); }
+  }
+  void analyse() {
+    memmove(ring.data(), ring.data() + HOP, (FFT - HOP) * sizeof(float)); memcpy(ring.data() + FFT - HOP, pend.data(), HOP * sizeof(float));
+    std::vector<std::complex<float>> a(FFT); double e = 0;
+    for (int i = 0; i < FFT; i++) a[i] = ring[i] * win[i];
+    for (int i = FFT - HOP; i < FFT; i++) e += double(ring[i]) * ring[i];
+    float rms = float(sqrt(e / HOP));
+    fft(a);
+    for (int k = 1; k < FFT / 2; k++) cur[k] = log1pf(2000.0f * std::abs(a[k]) / (FFT / 4));   // a full-scale tone reads about 7.6
+    auto rise = [&](float f0, float f1) {
+      int k0 = std::max(1, int(f0 * FFT / RATE)), k1 = std::min(FFT / 2 - 1, int(f1 * FFT / RATE)); float sum = 0;
+      for (int k = k0; k <= k1; k++) sum += std::max(0.0f, cur[k] - prev[k]);
+      return sum / (k1 - k0 + 1);
+    };
+    float kick = rise(30, 150), high = rise(4000, 12000);
+    prev = cur; hop++;
+    if (rms > 3e-4f) lastSound = hop;
+    onset(kick, kMean, kPeak, lastKick, 7, 0);    // at most one kick per 75 ms
+    onset(high, hMean, hPeak, lastHit, 5, 1);
+    loud += (rms - loud) * 0.035f; loudPeak = std::max(std::max(loudPeak * 0.9995f, 1e-3f), loud);   // the peak forgets in about 20 s
+    snd.present = hop - lastSound < 140; snd.level = std::min(1.0f, loud / loudPeak);
+  }
+};
+static void listenThread(std::string dev, bool log) {
+  pa_sample_spec ss; ss.format = PA_SAMPLE_FLOAT32LE; ss.rate = Analyzer::RATE; ss.channels = 1;
+  pa_buffer_attr ba; ba.maxlength = uint32_t(-1); ba.tlength = uint32_t(-1); ba.prebuf = uint32_t(-1); ba.minreq = uint32_t(-1); ba.fragsize = Analyzer::HOP * 4;
+  int err = 0;
+  pa_simple* s = pa_simple_new(nullptr, "galaxies", PA_STREAM_RECORD, dev.c_str(), "listening to the output", &ss, nullptr, &ba, &err);
+  if (!s) { fprintf(stderr, "sound: cannot listen (%s); carrying on without it\n", pa_strerror(err)); return; }
+  Analyzer an; an.log = log; float buf[Analyzer::HOP];
+  while (pa_simple_read(s, buf, sizeof buf, &err) >= 0) an.feed(buf, Analyzer::HOP);
+}
+// main thread side: what the picture reads
+static float kickU[16], hitU[16];      // 4 x (start time, strength, seed, 0) for the star shader
+static int kickN = 0, hitN = 0;
+static float gPulse = 0, gFlow = 1, gSoundMix = 0, gLevel = 0;   // kick punch, speed of time, "music is playing", loudness
+static bool soundOn = true;
+static void pollSound(float rdt) {
+  std::vector<std::pair<int, float>> ev; { std::lock_guard<std::mutex> l(snd.mx); ev.swap(snd.events); }
+  if (soundOn) for (auto& e : ev) {
+    float* u = e.first == 0 ? kickU + 4 * (kickN++ % 4) : hitU + 4 * (hitN++ % 4);
+    u[0] = gTime; u[1] = e.second; u[2] = float((kickN * 7 + hitN * 13) % 1000); u[3] = 0;
+    if (e.first == 0) gPulse = std::max(gPulse, e.second);
+  }
+  gPulse *= expf(-rdt * 9.0f);
+  gSoundMix += ((soundOn && snd.present ? 1.0f : 0.0f) - gSoundMix) * (1 - expf(-rdt * 2.0f));
+  gLevel += (snd.level - gLevel) * (1 - expf(-rdt * 1.2f));
+  gFlow = 1.0f + gSoundMix * (0.55f + 1.05f * gLevel * gLevel - 1.0f);   // quiet parts run at about half speed, loud ones at 1.6x
+}
+
 // ---------------------------------------------------------------- camera and drawing
 struct Cam { V3 eye, right, up, fwd; float vp[16]; float tanHalf, aspect; };
 static Cam camera(float yaw, float pitch, float dist, float aspect) {
@@ -738,6 +848,7 @@ static void render(const Cam& c, GLuint target) {
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, bPos); glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, bCol);
   glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, tRhs[0]);
   glUniform1f(U(pStars, "uTime"), gTime); glUniform1f(U(pStars, "uNova"), gNova);
+  glUniform4fv(U(pStars, "uKick"), 4, kickU); glUniform4fv(U(pStars, "uHit"), 4, hitU);
   float res = fbH / 1440.0f, psize = std::max(1.6f, 2.0f * res);
   glUniformMatrix4fv(U(pStars, "uVP"), 1, GL_FALSE, c.vp);
   glUniform1f(U(pStars, "uSize"), psize);
@@ -772,7 +883,7 @@ static void render(const Cam& c, GLuint target) {
   glUniform3f(U(pFinal, "uRight"), c.right.x, c.right.y, c.right.z); glUniform3f(U(pFinal, "uUp"), c.up.x, c.up.y, c.up.z);
   glUniform3f(U(pFinal, "uFwd"), c.fwd.x, c.fwd.y, c.fwd.z);
   glUniform1f(U(pFinal, "uTan"), c.tanHalf); glUniform1f(U(pFinal, "uAspect"), c.aspect);
-  glUniform1f(U(pFinal, "uExposure"), gExposure); glUniform1f(U(pFinal, "uBloomAmt"), gBloom);
+  glUniform1f(U(pFinal, "uExposure"), gExposure * (1.0f + 0.30f * gPulse)); glUniform1f(U(pFinal, "uBloomAmt"), gBloom);
   glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
@@ -817,6 +928,8 @@ static void drawLabel() {
   x += drawText("NEXT", x, y, dot, 0.70f, 0.80f, 1.0f, 0.45f) + 6 * dot;
   x += drawText(FAM_NAME[t], x, y, dot, 0.86f, 0.92f, 1.0f, 0.90f) + 6 * dot;
   drawText(FAM_KEY[t], x, y, dot, 0.70f, 0.80f, 1.0f, 0.45f);
+  const char* st = !soundOn ? "SOUND OFF" : gSoundMix > 0.3f ? "SOUND" : nullptr;   // bottom right: is it hearing music
+  if (st) drawText(st, fbW - 10 * dot - int(strlen(st)) * 6 * dot, y, dot, 0.70f, 0.80f, 1.0f, 0.45f);
 }
 
 // ---------------------------------------------------------------- input
@@ -831,6 +944,7 @@ static void onKey(GLFWwindow* w, int key, int, int action, int) {
   if (key == GLFW_KEY_R) wantReset = true;
   if (key == GLFW_KEY_F || key == GLFW_KEY_F11) wantFull = true;
   if (key == GLFW_KEY_SPACE) paused = !paused;
+  if (key == GLFW_KEY_M) soundOn = !soundOn;
   if (key >= GLFW_KEY_1 && key <= GLFW_KEY_9) forcedType = key - GLFW_KEY_1;   // pick the family of the next galaxy
   if (key == GLFW_KEY_0) forcedType = 9;
   if (key == GLFW_KEY_MINUS) forcedType = 10;
@@ -860,6 +974,8 @@ static void stats(int stepNo) {
 
 int main(int argc, char** argv) {
   const char* shot = nullptr; const char* framesDir = nullptr; int every = 50; int steps = 600, throwAt = -1, throw2 = -1, W = 1600, H = 900, statsEvery = 0; bool test = false, bench = false, windowed = false, fixedSeed = false, label = false;
+  const char* audioDev = "@DEFAULT_MONITOR@"; const char* audioPath = nullptr; bool audioLog = false, noSound = false; float listenFor = 0;
+  for (int i = 0; i < 4; i++) kickU[i * 4] = hitU[i * 4] = -100;
   float sYaw = 0.0f, sPitch = 0.62f, sDist = -1;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i]; auto nx = [&] { return i + 1 < argc ? argv[++i] : (char*)"0"; };
@@ -867,6 +983,8 @@ int main(int argc, char** argv) {
     else if (a == "--throw2") throw2 = atoi(nx()); else if (a == "--w") W = atoi(nx()); else if (a == "--h") H = atoi(nx());
     else if (a == "--stars") { NSTAR = int(atof(nx()) * 1048576); NHALO = NSTAR / 4; }
     else if (a == "--window") windowed = true; else if (a == "--label") label = true;
+    else if (a == "--audiodev") audioDev = nx(); else if (a == "--audiofile") audioPath = nx(); else if (a == "--audiolog") audioLog = true;
+    else if (a == "--nosound") noSound = true; else if (a == "--listen") listenFor = atof(nx());
     else if (a == "--stats") statsEvery = atoi(nx()); else if (a == "--test") test = true; else if (a == "--bench") bench = true;
     else if (a == "--exp") gExposure = atof(nx()); else if (a == "--bloom") gBloom = atof(nx());
     else if (a == "--types") { char* l = nx(); for (char* t = strtok(l, ","); t; t = strtok(nullptr, ",")) typeQueue.push_back(std::max(1, std::min(int(NFAM), atoi(t))) - 1); if (!typeQueue.empty()) { firstType = typeQueue[0]; typeQueue.erase(typeQueue.begin()); } }
@@ -880,6 +998,12 @@ int main(int argc, char** argv) {
   }
   NGAL = NSTAR + NHALO; NTOT = NGAL * SLOTS;
   bool headless = shot || test || bench || framesDir;
+  if (listenFor > 0) {   // no window: print what the listener hears for a while
+    std::thread(listenThread, std::string(audioDev), true).detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(int(listenFor * 1000)));
+    printf("heard sound: %s   loudness now %.2f\n", snd.present ? "yes" : "no", snd.level.load()); fflush(stdout); _exit(0);
+  }
+  FILE* audioFile = audioPath ? fopen(audioPath, "rb") : nullptr; Analyzer fileAn; fileAn.log = audioLog;   // raw float32 mono 48 kHz, for stills
 
   if (!glfwInit()) { fprintf(stderr, "no window system\n"); return 1; }
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4); glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
@@ -936,12 +1060,14 @@ int main(int argc, char** argv) {
       if (s == throwAt) throwGalaxy(norm(V3{0.8f, 0.45f, -0.4f}), norm(V3{0.2f, 0.9f, 0.4f}));
       if (s == throw2) throwGalaxy(norm(V3{-0.7f, -0.2f, 0.6f}), norm(V3{0.2f, 0.9f, 0.4f}));
       uploadReady();
-      step(0.5f, 1.0f / 60); gTime += 1.0f / 60;
+      if (audioFile) { float buf[800]; size_t got = fread(buf, 4, 800, audioFile); fileAn.feed(buf, got); }
+      pollSound(1.0f / 60);
+      step(0.5f * gFlow, 1.0f / 60); gTime += 1.0f / 60;
       if (statsEvery && s % statsEvery == 0) stats(s);
       if (framesDir && s % every == 0) {
         dist += ((thrown > 1 ? 200.0f : 120.0f) - dist) * 0.02f * every / 4;
         char path[512]; snprintf(path, sizeof path, "%s/f%05d.ppm", framesDir, s / every);
-        render(camera(sYaw + s * 0.02f / 60, sPitch, sDist > 0 ? sDist : dist, float(W) / H), fLdr); writePPM(path);
+        render(camera(sYaw + s * 0.02f / 60, sPitch, (sDist > 0 ? sDist : dist) * (1 - 0.035f * gPulse), float(W) / H), fLdr); if (label) drawLabel(); writePPM(path);
       }
     }
     glFinish(); double t1 = glfwGetTime();
@@ -952,6 +1078,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (!noSound) std::thread(listenThread, std::string(audioDev), audioLog).detach();
   double last = glfwGetTime(), start = last, fpsT = last; int frames = 0; bool everClicked = false;
   int winX = 0, winY = 0, winW = W, winH = H;
   while (!glfwWindowShouldClose(win)) {
@@ -966,11 +1093,12 @@ int main(int argc, char** argv) {
     }
     if (wantReset) { wantReset = false; reset(); start = now; everClicked = false; }
 
+    pollSound(rdt);
     float k = 1.0f - expf(-rdt * 4.0f); sm += (float(mouseX) - sm) * k; smy += (float(mouseY) - smy) * k;
     yaw = float(now - start) * 0.02f + (sm - 0.5f) * 4.0f;
     pitch = std::min(1.45f, std::max(-1.45f, 0.62f + (smy - 0.5f) * 2.2f));
     float want = (thrown > 1 ? 200.0f : 120.0f) * float(zoom); dist += (want - dist) * (1.0f - expf(-rdt * 0.8f));
-    Cam c = camera(yaw, pitch, dist, float(w) / h);
+    Cam c = camera(yaw, pitch, dist * (1 - 0.035f * gPulse), float(w) / h);
 
     if (clicked) {
       clicked = false; everClicked = true;
@@ -981,7 +1109,7 @@ int main(int argc, char** argv) {
     if (!everClicked && thrown == 1 && now - start > 8.0) { everClicked = true; throwGalaxy(norm(c.right * 0.8f + c.up * 0.5f), c.fwd); }
 
     uploadReady();
-    if (!paused) { step(std::min(rdt * SPEED, 0.9f), rdt); gTime += rdt; }
+    if (!paused) { step(std::min(rdt * SPEED * gFlow, 0.9f), rdt); gTime += rdt; }
     render(c, 0); drawLabel();
     glfwSwapBuffers(win);
     if (++frames, now - fpsT > 3.0) { if (getenv("GALAXIES_FPS")) { printf("%.0f fps  %dx%d\n", frames / (now - fpsT), w, h); fflush(stdout); } frames = 0; fpsT = now; }
