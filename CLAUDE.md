@@ -6,10 +6,10 @@ Direction (owner, 2026-11-19): "i just want some cool stuff". It is a toy to loo
 
 ## Build and run
 
-`make`, then `./galaxies` (full screen; `--window` for a window). Needs glfw, libepoxy, g++.
+`make`, then `./galaxies` (full screen; `--window` for a window). Needs glfw, libepoxy, libpulse, g++.
 
 Click = throw a galaxy in. Mouse = look. Wheel = zoom. `1-9 0 - = Backspace` = family of the
-next galaxy. `R` start over, `F` full screen, `Space` pause, `Esc` quit.
+next galaxy. `R` start over, `F` full screen, `Space` pause, `M` sound reaction on/off, `Esc` quit.
 Bottom left shows the family the next click throws in and its key (`drawLabel`, 5x7 dot font in `FONT`; `nextType()` peeks at it).
 
 ## How it works (all in `galaxies.cpp`)
@@ -20,6 +20,7 @@ Bottom left shows the family the next click throws in and its key (`drawLabel`, 
 | Particles | 4 slots x (1,048,576 stars + 262,144 dark-matter particles). A 5th galaxy replaces the oldest slot. |
 | Galaxies | 13 families (`F_*`). `roll()` picks random parameters and colours, `buildGalaxy()` makes the particles on the CPU. Two worker threads roll the next one of each family in advance. |
 | Drawing | Additive points into a float picture, bloom, asinh stretch (`FS_FINAL`). Supernova flashes and "young blue stars where it is crowded" are in `VS_STARS`, visual only. |
+| Sound | A thread listens to the monitor of the default output (never the microphone) through libpulse. `Analyzer` (2048-point FFT, 512 hop) finds kicks (30-150 Hz rise), sharp high hits (4-12 kHz rise) and loudness. `pollSound()` hands them to the picture: a kick runs a ripple of light down the density from every core (`uKick` in `VS_STARS`) plus a small zoom and exposure punch; a hit lights random stars (`uHit`); loudness sets the speed of time (`gFlow`, 0.55x to 1.6x). Visual only, gravity is untouched. With no sound playing it behaves as before. Bottom right shows `SOUND` while it hears music. |
 | Centring | `spawn()` kicks all stars so total momentum stays zero and slides the centre of mass back to the middle. |
 
 ## Checking (no window needed)
@@ -28,6 +29,7 @@ Bottom left shows the family the next click throws in and its key (`drawLabel`, 
 - `./galaxies --shot out.ppm --types 1,9 --seed 11 --steps 1100 --throw 150 --w 1920 --h 1080`
   then `ffmpeg -i out.ppm out.png`. `--types` = family numbers 1-13 (first galaxy, then throws).
 - `--frames DIR --every N` dumps a frame every N steps. `--bench` prints ms per step.
+- Sound without a speaker: `--audiofile F.raw` (float32 mono 48 kHz) feeds a file to the analysis in step with `--shot`/`--frames`; `--audiolog` prints each kick and hit; `--listen SEC` prints what the live listener hears; `--audiodev NAME` picks the source (a null sink's `NAME.monitor` tests the live path silently); `--nosound` turns the listener off.
 - `--label` draws the bottom-left label into a `--shot` still (stills have none by default).
 - `GALAXIES_FPS=1 ./galaxies` prints the frame rate.
 
