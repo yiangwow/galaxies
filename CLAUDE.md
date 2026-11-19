@@ -10,6 +10,7 @@ Direction (owner, 2026-11-19): "i just want some cool stuff". It is a toy to loo
 
 Click = throw a galaxy in. Mouse = look. Wheel = zoom. `1-9 0 - = Backspace` = family of the
 next galaxy. `R` start over, `F` full screen, `Space` pause, `Esc` quit.
+Bottom left shows the family the next click throws in and its key (`drawLabel`, 5x7 dot font in `FONT`; `nextType()` peeks at it).
 
 ## How it works (all in `galaxies.cpp`)
 
@@ -27,6 +28,7 @@ next galaxy. `R` start over, `F` full screen, `Space` pause, `Esc` quit.
 - `./galaxies --shot out.ppm --types 1,9 --seed 11 --steps 1100 --throw 150 --w 1920 --h 1080`
   then `ffmpeg -i out.ppm out.png`. `--types` = family numbers 1-13 (first galaxy, then throws).
 - `--frames DIR --every N` dumps a frame every N steps. `--bench` prints ms per step.
+- `--label` draws the bottom-left label into a `--shot` still (stills have none by default).
 - `GALAXIES_FPS=1 ./galaxies` prints the frame rate.
 
 Measured 2026-11-19 on the RX 9070 XT: 3.5 ms per step with 5.2 M particles, about 150 fps at

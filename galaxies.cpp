@@ -212,6 +212,11 @@ void main(){
 }
 )";
 
+static const char* FS_TEXT = R"(
+in vec2 uv; out vec4 o; layout(binding=0) uniform sampler2D uTex; uniform vec4 uCol;
+void main(){ o=vec4(uCol.rgb, uCol.a*texture(uTex,vec2(uv.x,1.0-uv.y)).r); }
+)";
+
 static const char* FS_FINAL = R"(
 in vec2 uv; out vec4 o;
 layout(binding=0) uniform sampler2D uHdr; layout(binding=1) uniform sampler2D uBloom;
@@ -295,7 +300,7 @@ static float len(V3 a) { return sqrtf(dot(a, a)); }
 static V3 norm(V3 a) { return a * (1.0f / len(a)); }
 
 // ---------------------------------------------------------------- state
-static GLuint pUpdate, pSpawn, pRhs, pSmooth, pRestrict, pProlong, pGrad, pStars, pDown, pUp, pFinal;
+static GLuint pUpdate, pSpawn, pRhs, pSmooth, pRestrict, pProlong, pGrad, pStars, pDown, pUp, pFinal, pText;
 static GLuint bPos, bVel, bCol, bTPos, bTVel, bTCol, vao;
 static GLuint tDens, tForce, tRhs[LEVELS], tPhi[LEVELS][2];
 static const int BLOOM = 6;
@@ -314,6 +319,9 @@ static float gFlux = 0.6f, gExposure = 0.3f, gBloom = 0.032f, gBeta = 0.85f, gVe
 
 // ---------------------------------------------------------------- galaxies: rolled from a recipe, built on the CPU
 enum { F_SPIRAL, F_BARRED, F_ELLIPTICAL, F_RING, F_POLAR, F_IRREGULAR, F_SOMBRERO, F_JETS, F_FLOCCULENT, F_GIANT, F_BULLSEYE, F_CARTWHEEL, F_PEA, NFAM };
+static const char* const FAM_NAME[NFAM] = {"SPIRAL", "BARRED SPIRAL", "ELLIPTICAL", "RING", "POLAR RING", "IRREGULAR", "SOMBRERO", "JETS", "FLOCCULENT",
+                                           "FAINT GIANT", "BULLSEYE", "CARTWHEEL", "GREEN PEA"};
+static const char* const FAM_KEY[NFAM] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", "BKSP"};
 static double typeMass[NFAM];
 
 // Ring stars are young and bright: each one carries 1/RING_ML of the mass of another star. A ring as heavy
@@ -678,13 +686,19 @@ static void reset() {
   moveStars(0, {0, 0, 0}); solve(14); extraCycles = 0;
 }
 // throw a galaxy in from direction q (unit vector, seen from the middle); the orbit lies in the plane across `axis`
-static void throwGalaxy(V3 q, V3 axis) {
-  static std::vector<int> bag;     // every family comes up once before any repeats
+static std::vector<int> bag;       // every family comes up once before any repeats
+// the family the next throw will use: the one picked with a key, else the next one out of the shuffled bag
+static int nextType() {
+  if (forcedType >= 0) return forcedType;
+  if (!typeQueue.empty()) return typeQueue.front();
   if (bag.empty()) { for (int i = 0; i < NFAM; i++) bag.push_back(i); std::shuffle(bag.begin(), bag.end(), rng); }
-  int type;
-  if (forcedType >= 0) { type = forcedType; forcedType = -1; }
-  else if (!typeQueue.empty()) { type = typeQueue.front(); typeQueue.erase(typeQueue.begin()); }
-  else { type = bag.back(); bag.pop_back(); }
+  return bag.back();
+}
+static void throwGalaxy(V3 q, V3 axis) {
+  int type = nextType();
+  if (forcedType >= 0) forcedType = -1;
+  else if (!typeQueue.empty()) typeQueue.erase(typeQueue.begin());
+  else bag.pop_back();
   double present = 0; for (int i = 0; i < SLOTS; i++) if (i != thrown % SLOTS) present += slotMass[i];
   float v = gVel * sqrtf(2 * GRAV * float(present + typeMass[type]) / SPAWN_R), beta = gBeta;
   V3 side = norm(cross(axis, q));
@@ -762,6 +776,49 @@ static void render(const Cam& c, GLuint target) {
   glDrawArrays(GL_TRIANGLES, 0, 3);
 }
 
+// ---------------------------------------------------------------- the label
+// A 5x7 dot font, capitals and digits only: 7 rows per glyph, bit 4 is the left dot.
+struct Glyph { char c; unsigned char r[7]; };
+static const Glyph FONT[] = {
+  {'A', {14, 17, 17, 31, 17, 17, 17}}, {'B', {30, 17, 17, 30, 17, 17, 30}}, {'C', {14, 17, 16, 16, 16, 17, 14}}, {'D', {30, 17, 17, 17, 17, 17, 30}},
+  {'E', {31, 16, 16, 30, 16, 16, 31}}, {'F', {31, 16, 16, 30, 16, 16, 16}}, {'G', {14, 17, 16, 23, 17, 17, 15}}, {'H', {17, 17, 17, 31, 17, 17, 17}},
+  {'I', {14, 4, 4, 4, 4, 4, 14}},      {'J', {7, 2, 2, 2, 2, 18, 12}},      {'K', {17, 18, 20, 24, 20, 18, 17}}, {'L', {16, 16, 16, 16, 16, 16, 31}},
+  {'M', {17, 27, 21, 21, 17, 17, 17}}, {'N', {17, 25, 21, 19, 17, 17, 17}}, {'O', {14, 17, 17, 17, 17, 17, 14}}, {'P', {30, 17, 17, 30, 16, 16, 16}},
+  {'Q', {14, 17, 17, 17, 21, 18, 13}}, {'R', {30, 17, 17, 30, 20, 18, 17}}, {'S', {15, 16, 16, 14, 1, 1, 30}},   {'T', {31, 4, 4, 4, 4, 4, 4}},
+  {'U', {17, 17, 17, 17, 17, 17, 14}}, {'V', {17, 17, 17, 17, 17, 10, 4}},  {'W', {17, 17, 17, 21, 21, 27, 17}}, {'X', {17, 17, 10, 4, 10, 17, 17}},
+  {'Y', {17, 17, 10, 4, 4, 4, 4}},     {'Z', {31, 1, 2, 4, 8, 16, 31}},
+  {'0', {14, 17, 19, 21, 25, 17, 14}}, {'1', {4, 12, 4, 4, 4, 4, 14}},      {'2', {14, 17, 1, 2, 4, 8, 31}},     {'3', {30, 1, 1, 14, 1, 1, 30}},
+  {'4', {2, 6, 10, 18, 31, 2, 2}},     {'5', {31, 16, 30, 1, 1, 17, 14}},   {'6', {6, 8, 16, 30, 17, 17, 14}},   {'7', {31, 1, 2, 4, 8, 8, 8}},
+  {'8', {14, 17, 17, 14, 17, 17, 14}}, {'9', {14, 17, 17, 15, 1, 2, 12}},
+  {'-', {0, 0, 0, 31, 0, 0, 0}},       {'=', {0, 0, 31, 0, 31, 0, 0}},
+};
+// draw one line of text with its left bottom corner at (x, y), `dot` screen pixels per font dot; returns its width
+static int drawText(const char* str, int x, int y, int dot, float r, float g, float b, float a) {
+  static GLuint tex = 0;
+  int n = int(strlen(str)), tw = n * 6; if (n == 0) return 0;
+  std::vector<unsigned char> px(size_t(tw) * 7, 0);
+  for (int i = 0; i < n; i++)
+    for (const Glyph& gl : FONT) if (gl.c == str[i])
+      for (int row = 0; row < 7; row++) for (int col = 0; col < 5; col++) if (gl.r[row] >> (4 - col) & 1) px[size_t(row) * tw + i * 6 + col] = 255;
+  if (!tex) { glGenTextures(1, &tex); }
+  glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, tw, 7, 0, GL_RED, GL_UNSIGNED_BYTE, px.data());
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glUseProgram(pText); glBindVertexArray(vao); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glViewport(x + dot, y - dot, tw * dot, 7 * dot); glUniform4f(U(pText, "uCol"), 0, 0, 0, a * 0.7f); glDrawArrays(GL_TRIANGLES, 0, 3);   // shadow
+  glViewport(x, y, tw * dot, 7 * dot); glUniform4f(U(pText, "uCol"), r, g, b, a); glDrawArrays(GL_TRIANGLES, 0, 3);
+  glDisable(GL_BLEND); glViewport(0, 0, fbW, fbH);
+  return tw * dot;
+}
+// bottom left: the family the next click throws in, and the key that picks it
+static void drawLabel() {
+  int dot = std::max(2, int(fbH / 480.0f + 0.5f)), x = 10 * dot, y = 10 * dot, t = nextType();
+  x += drawText("NEXT", x, y, dot, 0.70f, 0.80f, 1.0f, 0.45f) + 6 * dot;
+  x += drawText(FAM_NAME[t], x, y, dot, 0.86f, 0.92f, 1.0f, 0.90f) + 6 * dot;
+  drawText(FAM_KEY[t], x, y, dot, 0.70f, 0.80f, 1.0f, 0.45f);
+}
+
 // ---------------------------------------------------------------- input
 static double mouseX = 0.5, mouseY = 0.5, zoom = 1.0;
 static bool clicked = false, wantReset = false, wantFull = false, paused = false;
@@ -802,14 +859,14 @@ static void stats(int stepNo) {
 }
 
 int main(int argc, char** argv) {
-  const char* shot = nullptr; const char* framesDir = nullptr; int every = 50; int steps = 600, throwAt = -1, throw2 = -1, W = 1600, H = 900, statsEvery = 0; bool test = false, bench = false, windowed = false, fixedSeed = false;
+  const char* shot = nullptr; const char* framesDir = nullptr; int every = 50; int steps = 600, throwAt = -1, throw2 = -1, W = 1600, H = 900, statsEvery = 0; bool test = false, bench = false, windowed = false, fixedSeed = false, label = false;
   float sYaw = 0.0f, sPitch = 0.62f, sDist = -1;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i]; auto nx = [&] { return i + 1 < argc ? argv[++i] : (char*)"0"; };
     if (a == "--shot") shot = nx(); else if (a == "--steps") steps = atoi(nx()); else if (a == "--throw") throwAt = atoi(nx());
     else if (a == "--throw2") throw2 = atoi(nx()); else if (a == "--w") W = atoi(nx()); else if (a == "--h") H = atoi(nx());
     else if (a == "--stars") { NSTAR = int(atof(nx()) * 1048576); NHALO = NSTAR / 4; }
-    else if (a == "--window") windowed = true;
+    else if (a == "--window") windowed = true; else if (a == "--label") label = true;
     else if (a == "--stats") statsEvery = atoi(nx()); else if (a == "--test") test = true; else if (a == "--bench") bench = true;
     else if (a == "--exp") gExposure = atof(nx()); else if (a == "--bloom") gBloom = atof(nx());
     else if (a == "--types") { char* l = nx(); for (char* t = strtok(l, ","); t; t = strtok(nullptr, ",")) typeQueue.push_back(std::max(1, std::min(int(NFAM), atoi(t))) - 1); if (!typeQueue.empty()) { firstType = typeQueue[0]; typeQueue.erase(typeQueue.begin()); } }
@@ -839,7 +896,7 @@ int main(int argc, char** argv) {
 
   pUpdate = mkProg(CS_UPDATE); pSpawn = mkProg(CS_SPAWN); pRhs = mkProg(CS_RHS); pSmooth = mkProg(CS_SMOOTH);
   pRestrict = mkProg(CS_RESTRICT); pProlong = mkProg(CS_PROLONG); pGrad = mkProg(CS_GRAD);
-  pStars = mkProg(VS_STARS, FS_STARS); pDown = mkProg(VS_FULL, FS_DOWN); pUp = mkProg(VS_FULL, FS_UP); pFinal = mkProg(VS_FULL, FS_FINAL);
+  pStars = mkProg(VS_STARS, FS_STARS); pDown = mkProg(VS_FULL, FS_DOWN); pUp = mkProg(VS_FULL, FS_UP); pFinal = mkProg(VS_FULL, FS_FINAL); pText = mkProg(VS_FULL, FS_TEXT);
   glGenVertexArrays(1, &vao);
 
   tDens = mkTex3D(N, GL_R32UI, false); tForce = mkTex3D(N, GL_RGBA16F, true);
@@ -891,7 +948,7 @@ int main(int argc, char** argv) {
     printf("%d steps, %.2f ms per step, %d particles\n", steps, (t1 - t0) * 1000 / std::max(1, steps), NTOT);
     Cam c = camera(sYaw, sPitch, sDist > 0 ? sDist : (thrown > 1 ? 200 : 120), float(W) / H);
     if (bench) { double r0 = glfwGetTime(); for (int i = 0; i < 100; i++) render(c, fLdr); glFinish(); printf("%.2f ms per drawn frame at %dx%d\n", (glfwGetTime() - r0) * 10, W, H); }
-    if (shot) { render(c, fLdr); writePPM(shot); }
+    if (shot) { render(c, fLdr); if (label) drawLabel(); writePPM(shot); }
     return 0;
   }
 
@@ -925,7 +982,7 @@ int main(int argc, char** argv) {
 
     uploadReady();
     if (!paused) { step(std::min(rdt * SPEED, 0.9f), rdt); gTime += rdt; }
-    render(c, 0);
+    render(c, 0); drawLabel();
     glfwSwapBuffers(win);
     if (++frames, now - fpsT > 3.0) { if (getenv("GALAXIES_FPS")) { printf("%.0f fps  %dx%d\n", frames / (now - fpsT), w, h); fflush(stdout); } frames = 0; fpsT = now; }
   }
